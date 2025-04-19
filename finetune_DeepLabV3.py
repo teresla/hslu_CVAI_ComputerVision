@@ -49,14 +49,15 @@ from baseline_helpers import *  # get_image_mask_pairs, RoadTrainDataset, RoadTe
 # 1. Hyper‑Parameters --------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-EPOCHS             = 15
-N_FREEZE_EPOCHS    = 9        # freeze backbone for first N epochs
+EPOCHS             = 2
+N_FREEZE_EPOCHS    = 1        # freeze backbone for first N epochs
 LR_BACKBONE        = 1e-4
 LR_HEAD            = 1e-3
 WEIGHT_DECAY       = 1e-4
 THRESH             = 0.5      # binarise sigmoid output
 CHECKPOINT_PATH    = "models/best_deeplabv3_road.pth"
-NUM_SAMPLES_TO_LOG = 4
+K_FOLDS            = 5
+FIXED_SAMPLE_COUNT = 8
 
 # ---------------------------------------------------------------------------
 # 2. Repro & Logger ----------------------------------------------------------
@@ -80,7 +81,7 @@ deepglobe  = get_image_mask_pairs(DEEPGLOBE_IMG_DIR, DEEPGLOBE_MASK_DIR)
 suburb     = get_image_mask_pairs(SUBURB_IMG_DIR,     SUBURB_MASK_DIR)
 generated  = get_image_mask_pairs(GEN_IMG_DIR,        GEN_MASK_DIR)
 
-train_images, train_masks, val_images, val_masks = prepare_train_test_sets(
+train_images, train_masks, test_images, test_masks = prepare_train_test_sets(
     deepglobe, suburb, generated,
     deepglobe_sample_size=6000,
     suburb_sample_size=100,
@@ -88,7 +89,12 @@ train_images, train_masks, val_images, val_masks = prepare_train_test_sets(
     seed=SEED,
 )
 
-logger.info(f"Train {len(train_images)} | Val {len(val_images)}")
+logger.info(f"Train {len(train_images)} | Test {len(test_images)}")
+
+full_ds = RoadDataset(train_images, train_masks, transform=None)
+
+# choose N fixed indices once so they stay the same for every fold & epoch
+FIXED_IDX = random.sample(range(len(full_ds)), FIXED_SAMPLE_COUNT)
 
 # ---------------------------------------------------------------------------
 # 4. Transforms & Datasets ---------------------------------------------------
@@ -111,12 +117,22 @@ val_transform = A.Compose([
     ToTensorV2(),
 ])
 
-train_ds = RoadDataset(train_images, train_masks, transform=train_transform)
-val_ds   = RoadDataset(val_images,   val_masks,   transform=val_transform)
+# K‑fold wrapper ------------------------------------------------------------
+kfold = KFold(n_splits=K_FOLDS, shuffle=True, random_state=SEED)
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  drop_last=True)
-val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False)
+for fold, (train_idx, val_idx) in enumerate(kfold.split(full_ds)):
+    train_subset = Subset(full_ds, train_idx)
+    val_subset  = Subset(full_ds, val_idx)
 
+    # apply transforms on‑the‑fly via wrapper datasets -------------
+    train_ds = RoadDatasetWrapper(train_subset, transform=train_transform)
+    val_ds  = RoadDatasetWrapper(val_subset,  transform=val_transform)
+
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE,
+                              shuffle=True,  drop_last=True)
+    val_loader  = DataLoader(val_ds,  batch_size=BATCH_SIZE,
+                              shuffle=False)
+train_set_this_fold = set(train_idx)
 # ---------------------------------------------------------------------------
 # 5. Model -------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -125,8 +141,6 @@ weights = DeepLabV3_ResNet50_Weights.DEFAULT
 model = torchvision.models.segmentation.deeplabv3_resnet50(weights=weights)
 
 # replace classifier & aux layer with binary heads
-logger.info(f"Curent last layer: {model.classifier[-1]}")
-logger.info(f"Current aux layer: {model.aux_classifier[-1]}")
 model.classifier[-1]      = nn.Conv2d(256, 1, kernel_size=1)
 if model.aux_classifier is not None:
     model.aux_classifier[-1] = nn.Conv2d(256, 1, kernel_size=1)
@@ -190,15 +204,31 @@ wandb.config.update({
 # ---------------------------------------------------------------------------
 # 8. Training Loop -----------------------------------------------------------
 # ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def log_fixed_samples(model, dataset, train_set, epoch):
+    model.eval()
+    for k, global_idx in enumerate(FIXED_IDX):
+        img, mask = dataset[global_idx]            # raw (no aug, no tensor)
+        img_t = val_transform(image=np.array(img))["image"].unsqueeze(0).to(DEVICE)
+
+        pred = (torch.sigmoid(model(img_t)["out"]) > THRESH).float()[0]
+
+        phase = "train" if global_idx in train_set else "val"
+        wandb.log({f"{phase}_fixed_{k}": [
+            wandb.Image(img_t[0].cpu().permute(1,2,0).numpy(), caption=f"{phase} img"),
+            wandb.Image(pred[0].cpu().numpy(),               caption="pred"),
+            wandb.Image(np.array(mask),                      caption="gt"),
+        ]}, step=epoch)
+
+
 best_val_loss = math.inf            # unified, typo fixed
 for epoch in range(1, EPOCHS + 1):
-
     # ---------- TRAIN ------------------------------------------------------
     model.train()
     tr_loss, tr_iou, tr_dice = 0, [], []
-    sample_t = 0                    # image‑logging counter
 
-    for images, masks in tqdm(train_loader,
+    for images, masks, _ in tqdm(train_loader,
                                  desc=f"Train {epoch}/{EPOCHS}"):
         images, masks = images.to(DEVICE), masks.float().to(DEVICE)
 
@@ -216,18 +246,6 @@ for epoch in range(1, EPOCHS + 1):
             tr_iou.append(compute_iou (preds_bin[i], masks[i]))
             tr_dice.append(compute_dice(preds_bin[i], masks[i]))
 
-            # sample image logging -----------------------------------------
-            if sample_t < NUM_SAMPLES_TO_LOG:
-                wandb.log({f"train_sample_{sample_t}": [
-                    wandb.Image(images[i].cpu().permute(1,2,0).numpy(),
-                                caption="train img"),
-                    wandb.Image(preds_bin[i][0].cpu().numpy(),
-                                caption="train pred"),
-                    wandb.Image(masks[i][0].cpu().numpy(),
-                                caption="train gt")]
-                })
-                sample_t += 1
-
     tr_loss  /= len(train_loader.dataset)
     miou_tr   = np.mean(tr_iou)
     dice_tr   = np.mean(tr_dice)
@@ -235,10 +253,9 @@ for epoch in range(1, EPOCHS + 1):
     # ---------- VALIDATION --------------------------------------------------
     model.eval()
     val_loss, v_iou, v_dice = 0, [], []
-    sample_v = 0
 
     with torch.no_grad():
-        for images, masks in tqdm(val_loader, desc="Val"):
+        for images, masks, _ in tqdm(val_loader, desc="Val"):
             images, masks = images.to(DEVICE), masks.float().to(DEVICE)
             logits   = model(images)["out"]
             val_loss += mixed_loss(logits, masks).item() * images.size(0)
@@ -248,16 +265,6 @@ for epoch in range(1, EPOCHS + 1):
                 v_iou.append(compute_iou(preds_bin[i], masks[i]))
                 v_dice.append(compute_dice(preds_bin[i], masks[i]))
 
-                if sample_v < NUM_SAMPLES_TO_LOG:
-                    wandb.log({f"val_sample_{sample_v}": [
-                        wandb.Image(images[i].cpu().permute(1,2,0).numpy(),
-                                    caption="val img"),
-                        wandb.Image(preds_bin[i][0].cpu().numpy(),
-                                    caption="val pred"),
-                        wandb.Image(masks[i][0].cpu().numpy(),
-                                    caption="val gt")]
-                    })
-                    sample_v += 1
 
     val_loss /= len(val_loader.dataset)
     miou_val  = np.mean(v_iou)
@@ -288,6 +295,7 @@ for epoch in range(1, EPOCHS + 1):
         f"train {tr_loss:.4f} (mIoU {miou_tr:.3f}, Dice {dice_tr:.3f}) | "
         f"val {val_loss:.4f} (mIoU {miou_val:.3f}, Dice {dice_val:.3f})"
     )
+    log_fixed_samples(model, full_ds, train_set_this_fold, epoch)
 
     # ---------- CHECKPOINT --------------------------------------------------
     if val_loss < best_val_loss:

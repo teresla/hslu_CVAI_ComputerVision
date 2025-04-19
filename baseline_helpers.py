@@ -5,6 +5,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 import logging
 import random
+import torch
 from sklearn.model_selection import train_test_split
 
 def get_logger(name="seg_logger", level=logging.INFO):
@@ -42,9 +43,17 @@ class RoadDataset(Dataset):
         image = np.array(Image.open(self.image_paths[idx]).convert("RGB"))
         mask = np.array(Image.open(self.mask_paths[idx]).convert("L"))
         mask = (mask > 128).astype(np.float32)
-        augmented = self.transform(image=image, mask=mask)
-        image_t = augmented["image"]
-        mask_t = augmented["mask"].unsqueeze(0)
+        
+        if self.transform is not None:                          # NEW
+            augmented = self.transform(image=image, mask=mask)
+            image_t  = augmented["image"]                # already torch tensor
+            mask_t = augmented["mask"].unsqueeze(0)
+        else:                                                   # NEW
+            # fall‑back: plain tensor, 0‑1 range, CHW fmt
+            image_t  = torch.from_numpy(image).permute(2, 0, 1).float() / 255.
+            mask_t = torch.from_numpy(mask).unsqueeze(0)
+
+
         if self.return_path:
             return image_t, mask_t, self.image_paths[idx]
         return image_t, mask_t
@@ -94,3 +103,22 @@ def prepare_train_test_sets(
     test_masks = list(dg_test_m) + list(sb_test_m)
 
     return train_images, train_masks, test_images, test_masks
+
+class RoadDatasetWrapper(torch.utils.data.Dataset):
+    def __init__(self, subset, transform=None):
+        self.subset, self.transform = subset, transform
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, i):
+        img_t, mask_t = self.subset[i]          # tensors, CHW and 1HW
+
+        if self.transform is not None:
+            img_np  = img_t.permute(1, 2, 0).cpu().numpy()   # → HWC
+            mask_np = mask_t.squeeze(0).cpu().numpy()        # → HW
+            aug = self.transform(image=img_np, mask=mask_np)
+            img_t  = aug["image"]                            # back to tensor CHW
+            mask_t = aug["mask"].unsqueeze(0)
+
+        return img_t, mask_t, self.subset.indices[i]
