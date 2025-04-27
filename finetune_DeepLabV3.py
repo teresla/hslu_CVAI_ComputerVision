@@ -49,8 +49,8 @@ from baseline_helpers import *  # get_image_mask_pairs, RoadTrainDataset, RoadTe
 # 1. Hyper‑Parameters --------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-EPOCHS             = 2
-N_FREEZE_EPOCHS    = 1        # freeze backbone for first N epochs
+EPOCHS             = 12
+N_FREEZE_EPOCHS    = 7       # freeze backbone for first N epochs
 LR_BACKBONE        = 1e-4
 LR_HEAD            = 1e-3
 WEIGHT_DECAY       = 1e-4
@@ -162,7 +162,7 @@ def dice_loss(inputs, targets, smooth=1):
 bce = nn.BCEWithLogitsLoss()
 
 def mixed_loss(pred, target):
-    return 0.5 * bce(pred, target) + 0.5 * dice_loss(pred, target)
+    return 0.2 * bce(pred, target) + 0.8 * dice_loss(pred, target)
 
 # param groups
 backbone_params = []
@@ -179,6 +179,8 @@ optimizer = torch.optim.AdamW([
 ], weight_decay=WEIGHT_DECAY)
 
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
+
+
 
 # freeze backbone for first N epochs
 for m in model.backbone.parameters():
@@ -209,20 +211,32 @@ wandb.config.update({
 def log_fixed_samples(model, dataset, train_set, epoch):
     model.eval()
     for k, global_idx in enumerate(FIXED_IDX):
-        img, mask = dataset[global_idx]            # raw (no aug, no tensor)
-        img_t = val_transform(image=np.array(img))["image"].unsqueeze(0).to(DEVICE)
+        img_t_, mask_t_ = dataset[global_idx]           # tensors, CHW & 1HW
+
+        img_np  = img_t_.permute(1, 2, 0).cpu().numpy()   # HWC
+        mask_np = mask_t_.squeeze(0).cpu().numpy()        # HW
+        aug     = val_transform(image=img_np, mask=mask_np)
+
+        img_t   = aug["image"].unsqueeze(0).to(DEVICE)    # 1×3×H×W
+        mask_r  = aug["mask"]                             # H×W
 
         pred = (torch.sigmoid(model(img_t)["out"]) > THRESH).float()[0]
 
         phase = "train" if global_idx in train_set else "val"
         wandb.log({f"{phase}_fixed_{k}": [
-            wandb.Image(img_t[0].cpu().permute(1,2,0).numpy(), caption=f"{phase} img"),
-            wandb.Image(pred[0].cpu().numpy(),               caption="pred"),
-            wandb.Image(np.array(mask),                      caption="gt"),
+            wandb.Image(img_t[0].cpu().permute(1,2,0).numpy(),
+                        caption=f"{phase} img"),
+            wandb.Image(pred[0].cpu().numpy(),  caption="pred"),
+            wandb.Image(mask_r.cpu().numpy(),    caption="gt"),
         ]}, step=epoch)
 
 
+
 best_val_loss = math.inf            # unified, typo fixed
+best_val_dice   = -float("inf")    # higher = better
+es_patience     = 3                # stop after 3 non‑improving epochs
+es_wait         = 0                # epochs since last improvement
+
 for epoch in range(1, EPOCHS + 1):
     # ---------- TRAIN ------------------------------------------------------
     model.train()
@@ -302,5 +316,19 @@ for epoch in range(1, EPOCHS + 1):
         best_val_loss = val_loss
         torch.save(model.state_dict(), CHECKPOINT_PATH)
         logger.info(f"✅ Saved new best model @ {CHECKPOINT_PATH}")
+
+    # ---------- EARLY‑STOPPING on validation Dice -----------------------------
+    if dice_val > best_val_dice + 1e-6:          # tiny epsilon to avoid ties
+        best_val_dice = dice_val
+        es_wait = 0
+    else:
+        es_wait += 1
+        logger.info(f"No val‑Dice improvement for {es_wait}/{es_patience} epoch(s)")
+
+    if es_wait >= es_patience:
+        logger.info(f"⏹ Early stopping triggered at epoch {epoch} "
+                    f"(best val‑Dice = {best_val_dice:.4f})")
+        break
+
 
 logger.info("Training complete. Best val loss = %.4f", best_val_loss)

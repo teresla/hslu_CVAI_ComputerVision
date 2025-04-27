@@ -16,4 +16,4 @@ TEST_SPLIT = 0.2
 SEED = 42
 NUM_SAMPLES_TO_LOG = 5
 
-DEVICE = "mps" if hasattr(__import__('torch').backends, "mps") and __import__('torch').backends.mps.is_available() else "cpu"
+DEVICE = "mps" if hasattr(__import__('torch').backends, "mps") and __import__('torch').backends.mps.is_available() else "cuda" if __import__('torch').cuda.is_available() else "cpu"
