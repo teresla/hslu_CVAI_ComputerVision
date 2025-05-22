@@ -78,22 +78,22 @@ def main():
         # Resize ground truth to match drone image
         gt_resized = cv2.resize(gt_img, (drone_resized.shape[1], drone_resized.shape[0]))
         
-        # Apply Gaussian blur
-        print("Applying Gaussian blur...")
-        drone_blurred = apply_gaussian_blur(drone_resized, kernel_size=(5, 5))
-        gt_blurred = apply_gaussian_blur(gt_resized, kernel_size=(5, 5))
+        # Apply bilateral blur to both images
+        print("Applying bilateral blur...")
+        drone_bilateral = apply_bilateral_blur(drone_resized, d=15, sigma_color=75, sigma_space=75)
+        google_bilateral = apply_bilateral_blur(google_img, d=15, sigma_color=75, sigma_space=75)
         
         # Create comparison image
         print("Creating comparison image...")
         comparison = np.hstack([
-            drone_blurred,    # Blurred drone
-            google_img,       # Original Google
-            gt_resized,       # Original ground truth
-            gt_blurred        # Blurred ground truth
+            drone_resized,     # Original drone
+            drone_bilateral,   # Bilateral blur drone
+            google_img,        # Original Google
+            google_bilateral   # Bilateral blur Google
         ])
         
         # Save comparison image
-        save_image(comparison, output_dir / "comparison_gaussian_5_incl_GT.png")
+        save_image(comparison, output_dir / "comparison_bilateral_both.png")
         print("Processing complete. Check the 'processed' directory for results.")
         
     except Exception as e:

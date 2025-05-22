@@ -1,10 +1,15 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aerial Image Analysis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-image@0.4.0/leaflet-image.js"></script>
+    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
     <style>
         body {
             margin: 0;
@@ -139,223 +144,374 @@
             border: 1px solid #ccc;
             border-radius: 5px;
         }
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            margin-top: 10px;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:focus + .slider {
+            box-shadow: 0 0 1px #2196F3;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        .slider.round {
+            border-radius: 34px;
+        }
+        .slider.round:before {
+            border-radius: 50%;
+        }
+        .toggle-label {
+            margin-left: 10px;
+            font-size: 14px;
+        }
+        .statistics-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        
+        .statistics-table th,
+        .statistics-table td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .statistics-table th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+        }
+        
+        .color-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
     </style>
 </head>
 <body>
-    <div class="main-container">
-        <div class="left-panel">
+    <div id="app">
+        <!-- Initial View -->
+        <div id="initial-view" class="view">
             <div class="map-container">
                 <div id="map"></div>
             </div>
-            <div class="button-container">
-                <button onclick="analyzeArea()">Analyze Selected Area</button>
+            <div class="controls">
+                <button id="analyze-btn" class="primary-btn" disabled>Analyze Map</button>
             </div>
-            <div class="debug-area">
-                <h3>Debug Information</h3>
-                <div>
-                    <strong>Input Image:</strong>
-                    <img id="debugImage" class="debug-image" style="display: none;">
-                    <p id="debugImageInfo"></p>
+            <div class="instructions">
+                <h2>Instructions</h2>
+                <ol>
+                    <li>Upload your own image for analysis, or</li>
+                    <li>Use the map above to navigate to your area of interest</li>
+                    <li>For best results, use zoom level 19 or higher</li>
+                </ol>
+                <div class="upload-alternative">
+                    <p>Upload your own image:</p>
+                    <input type="file" id="image-upload" accept="image/*">
                 </div>
             </div>
         </div>
-        <div class="right-panel">
-            <div id="results" class="results" style="display: none;">
+
+        <!-- Analysis View -->
+        <div id="analysis-view" class="view" style="display: none;">
+            <div class="analysis-header">
                 <h2>Analysis Results</h2>
-                <div class="segmentation-result">
-                    <h3>Segmentation Result</h3>
-                    <img id="segmentationImage" style="display: none;">
-                </div>
-                <p>Meters per pixel: <span id="metersPerPixel"></span></p>
-                <div id="classResults" class="class-results">
-                    <!-- Results will be populated here -->
-                </div>
-                <div class="legend">
-                    <h3>Class Legend</h3>
-                    <div id="legendContent"></div>
+                <div class="model-controls">
+                    <label>
+                        <input type="checkbox" id="use-simplified" checked>
+                        Use Simplified Classes
+                    </label>
+                    <label>
+                        <input type="checkbox" id="use-custom-model" checked>
+                        Use Custom Model
+                    </label>
                 </div>
             </div>
-            <div id="log"></div>
+
+            <div class="analysis-content">
+                <div class="image-container">
+                    <div class="original-image">
+                        <h3>Original Image</h3>
+                        <img id="original-img" src="" alt="Original image">
+                    </div>
+                    <div class="segmented-image">
+                        <h3>Segmentation Result</h3>
+                        <img id="segmented-img" src="" alt="Segmentation result">
+                    </div>
+                </div>
+                
+                <div class="legend">
+                    <h3>Class Distribution</h3>
+                    <div id="statistics"></div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <button id="new-analysis-btn" class="primary-btn">New Analysis</button>
+            </div>
         </div>
     </div>
 
-    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/leaflet-image@0.4.0/leaflet-image.js"></script>
-    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
     <script>
-        // Add this at the top of your script section
-        const CLASS_COLORS = {
-            'background': '#000000',
-            'pavement': '#804080',
-            'grass': '#00FF00',
-            'vegetation': '#006600',
-            'roof': '#464646',
-            'water': '#1C2AA8',
-            'car': '#098F96'
-        };
+        let map;
+        let currentMarker;
+        let currentZoom = 18;
+        const MIN_OPTIMAL_ZOOM = 19;
 
-        // Initialize map centered on Zurich with fixed zoom level 18
-        const map = L.map('map').setView([47.376887, 8.541694], 18);
-        setTimeout(() => {
-            map.invalidateSize();
-        }, 100);
-        
-        // Use Google Satellite imagery with higher zoom levels
-        const satelliteLayer = L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
-            attribution: '© Google',
-            maxZoom: 22  // Google Satellite supports up to zoom level 22
-        }).addTo(map);
+        // Initialize map
+        function initMap() {
+            map = L.map('map', {
+                center: [47.3769, 8.5417],
+                zoom: 18,
+                zoomControl: true
+            });
+            
+            // Use Google Satellite imagery
+            const satelliteLayer = L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+                attribution: '© Google',
+                maxZoom: 22
+            }).addTo(map);
 
-        // Add geocoder control for address search
-        const geocoder = L.Control.geocoder({
-            defaultMarkGeocode: false,
-            placeholder: 'Search for an address...',
-            errorMessage: 'Nothing found.'
-        }).on('markgeocode', function(e) {
-            const bbox = e.geocode.bbox;
-            const poly = L.polygon([
-                bbox.getSouthEast(),
-                bbox.getNorthEast(),
-                bbox.getNorthWest(),
-                bbox.getSouthWest()
-            ]);
-            map.fitBounds(poly.getBounds());
-        }).addTo(map);
+            // Add geocoder control for address search
+            const geocoder = L.Control.geocoder({
+                defaultMarkGeocode: false,
+                placeholder: 'Search for an address...',
+                errorMessage: 'Nothing found.'
+            }).on('markgeocode', function(e) {
+                const bbox = e.geocode.bbox;
+                const poly = L.polygon([
+                    bbox.getSouthEast(),
+                    bbox.getNorthEast(),
+                    bbox.getNorthWest(),
+                    bbox.getSouthWest()
+                ]);
+                map.fitBounds(poly.getBounds());
+            }).addTo(map);
 
-        // Add scale bar
-        L.control.scale({
-            imperial: false,
-            metric: true,
-            position: 'bottomleft'
-        }).addTo(map);
+            map.on('click', function(e) {
+                if (currentMarker) {
+                    map.removeLayer(currentMarker);
+                }
+                currentMarker = L.marker(e.latlng).addTo(map);
+                updateAnalyzeButton();
+            });
 
-        // Enable zoom controls
-        map.scrollWheelZoom.enable();
-        map.doubleClickZoom.enable();
-        map.touchZoom.enable();
-        map.boxZoom.enable();
-        map.keyboard.enable();
-        map.zoomControl.enable();
+            map.on('zoomend', function() {
+                currentZoom = map.getZoom();
+                updateAnalyzeButton();
+            });
 
-        // Set minimum and maximum zoom levels
-        map.setMinZoom(15);  // Don't zoom out too far
-        map.setMaxZoom(22);  // Allow zooming in much closer
+            // Enable zoom controls
+            map.scrollWheelZoom.enable();
+            map.doubleClickZoom.enable();
+            map.touchZoom.enable();
+            map.boxZoom.enable();
+            map.keyboard.enable();
 
-        // Add zoom level warning
-        map.on('zoomend', function() {
-            const currentZoom = map.getZoom();
-            if (currentZoom >= 20) {
-                log('Note: You are now at a very high zoom level. This may affect analysis accuracy.');
+            // Set minimum and maximum zoom levels
+            map.setMinZoom(15);
+            map.setMaxZoom(22);
+
+            // Force a resize after initialization
+            setTimeout(() => {
+                map.invalidateSize();
+            }, 100);
+        }
+
+        function updateAnalyzeButton() {
+            const analyzeBtn = document.getElementById('analyze-btn');
+            if (currentMarker) {
+                analyzeBtn.disabled = false;
+                if (currentZoom < MIN_OPTIMAL_ZOOM) {
+                    analyzeBtn.innerHTML = `Analyze Map (Zoom in for better results)`;
+                    analyzeBtn.classList.add('warning');
+                } else {
+                    analyzeBtn.innerHTML = 'Analyze Map';
+                    analyzeBtn.classList.remove('warning');
+                }
+            } else {
+                analyzeBtn.disabled = true;
+                analyzeBtn.innerHTML = 'Analyze Map';
+                analyzeBtn.classList.remove('warning');
+            }
+        }
+
+        // Handle image upload
+        let uploadedImage = null;
+        const imageUpload = document.getElementById('image-upload');
+        const analyzeBtn = document.getElementById('analyze-btn');
+
+        imageUpload.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    uploadedImage = e.target.result;
+                    analyzeBtn.disabled = false;
+                    analyzeBtn.textContent = 'Analyze Uploaded Image';
+                    analyzeBtn.classList.remove('warning');
+                };
+                reader.readAsDataURL(file);
             }
         });
 
-        function log(message) {
-            const logElement = document.getElementById('log');
-            const timestamp = new Date().toLocaleTimeString();
-            logElement.innerHTML += `[${timestamp}] ${message}<br>`;
-            logElement.scrollTop = logElement.scrollHeight;
+        // Handle analyze button click
+        document.getElementById('analyze-btn').addEventListener('click', async function() {
+            if (uploadedImage) {
+                // Use uploaded image
+                showView('analysis-view');
+                document.getElementById('original-img').src = uploadedImage;
+                analyzeImage(uploadedImage, 0, 0, 20); // Use default values for lat/lng/zoom
+                uploadedImage = null; // Reset uploaded image
+                imageUpload.value = ''; // Clear file input
+                analyzeBtn.textContent = 'Analyze Map';
+                analyzeBtn.disabled = true;
+            } else {
+                // Use map image
+                if (!currentMarker) {
+                    alert('Please select a location on the map first');
+                    return;
+                }
+
+                const latlng = currentMarker.getLatLng();
+                const zoom = map.getZoom();
+                
+                // Get the map image
+                const mapImage = await getMapImage(latlng, zoom);
+                
+                // Show analysis view
+                showView('analysis-view');
+                
+                // Display original image
+                document.getElementById('original-img').src = mapImage;
+                
+                // Perform analysis
+                analyzeImage(mapImage, latlng.lat, latlng.lng, zoom);
+            }
+        });
+
+        // Handle new analysis button
+        document.getElementById('new-analysis-btn').addEventListener('click', function() {
+            showView('initial-view');
+            if (currentMarker) {
+                map.removeLayer(currentMarker);
+                currentMarker = null;
+            }
+            uploadedImage = null;
+            imageUpload.value = '';
+            analyzeBtn.textContent = 'Analyze Map';
+            analyzeBtn.disabled = true;
+            updateAnalyzeButton();
+        });
+
+        // Switch views
+        function showView(viewId) {
+            document.querySelectorAll('.view').forEach(view => {
+                view.style.display = 'none';
+            });
+            document.getElementById(viewId).style.display = 'block';
         }
 
-        function captureMapImage() {
+        // Get map image
+        async function getMapImage(latlng, zoom) {
             return new Promise((resolve, reject) => {
                 leafletImage(map, function(err, canvas) {
                     if (err) {
                         reject(err);
                         return;
                     }
-                    // Convert canvas to base64
-                    const imageData = canvas.toDataURL('image/png');
-                    resolve(imageData);
+                    resolve(canvas.toDataURL('image/png'));
                 });
             });
         }
 
-        function updateDebugInfo(imageData) {
-            const debugImage = document.getElementById('debugImage');
-            const debugImageInfo = document.getElementById('debugImageInfo');
-            
-            debugImage.src = imageData;
-            debugImage.style.display = 'block';
-            
-            // Create a temporary image to get dimensions
-            const img = new Image();
-            img.onload = function() {
-                debugImageInfo.textContent = `Image dimensions: ${img.width}x${img.height} pixels`;
-            };
-            img.src = imageData;
-        }
+        // Initialize the application
+        window.onload = function() {
+            initMap();
+            updateAnalyzeButton();
+        };
 
-        function updateLegend(stats) {
-            const legendContent = document.getElementById('legendContent');
-            legendContent.innerHTML = '';
-            
-            Object.entries(stats).forEach(([className, data]) => {
-                const item = document.createElement('div');
-                item.className = 'legend-item';
-                
-                const colorBox = document.createElement('div');
-                colorBox.className = 'legend-color';
-                colorBox.style.backgroundColor = data.color;
-                
-                const label = document.createElement('span');
-                label.textContent = `${className}: ${data.percentage.toFixed(2)}%`;
-                
-                item.appendChild(colorBox);
-                item.appendChild(label);
-                legendContent.appendChild(item);
-            });
-        }
-
-        async function analyzeArea() {
+        // Analyze image
+        async function analyzeImage(imageData, lat, lng, zoom) {
             try {
-                const center = map.getCenter();
-                const zoom = map.getZoom();
-                
-                log(`Analyzing area at lat: ${center.lat.toFixed(6)}, lng: ${center.lng.toFixed(6)}, zoom: ${zoom}`);
-                
-                // Capture map image
-                const imageData = await captureMapImage();
-                updateDebugInfo(imageData);
-                
-                // Send to backend for analysis
+                const useSimplified = document.getElementById('use-simplified').checked;
+                const useCustomModel = document.getElementById('use-custom-model').checked;
+
                 const response = await fetch('/analyze', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        lat: center.lat,
-                        lng: center.lng,
+                        lat: lat,
+                        lng: lng,
                         zoom: zoom,
-                        image: imageData
+                        image: imageData,
+                        use_simplified: useSimplified,
+                        use_custom_model: useCustomModel
                     })
                 });
-                
+
                 const data = await response.json();
                 
-                document.getElementById('results').style.display = 'block';
-                document.getElementById('metersPerPixel').textContent = data.meters_per_pixel.toFixed(2);
+                // Display segmented image
+                document.getElementById('segmented-img').src = data.segmented_image;
                 
-                // Display segmentation image
-                const segmentationImage = document.getElementById('segmentationImage');
-                segmentationImage.src = data.segmented_image;
-                segmentationImage.style.display = 'block';
-                
-                // Update class results
-                const classResultsDiv = document.getElementById('classResults');
-                classResultsDiv.innerHTML = ''; // Clear previous results
+                // Update statistics
+                const statisticsDiv = document.getElementById('statistics');
+                statisticsDiv.innerHTML = '';
                 
                 // Sort classes by percentage (highest first)
                 const sortedClasses = Object.entries(data.segmentation_result)
                     .sort((a, b) => b[1].percentage - a[1].percentage);
                 
-                // Create results table
+                // Create statistics table
                 const table = document.createElement('table');
+                table.className = 'statistics-table';
                 
                 // Add header
                 const header = table.createTHead();
                 const headerRow = header.insertRow();
-                ['Class', 'Color', 'Percentage', 'Area (m²)'].forEach(text => {
+                ['Class', 'Percentage', 'Area (m²)'].forEach(text => {
                     const th = document.createElement('th');
                     th.textContent = text;
                     headerRow.appendChild(th);
@@ -366,18 +522,13 @@
                 sortedClasses.forEach(([className, stats]) => {
                     const row = tbody.insertRow();
                     
-                    // Class name
+                    // Class name with color indicator
                     const nameCell = row.insertCell();
-                    nameCell.textContent = className;
-                    
-                    // Color
-                    const colorCell = row.insertCell();
                     const colorBox = document.createElement('div');
-                    colorBox.style.width = '20px';
-                    colorBox.style.height = '20px';
+                    colorBox.className = 'color-indicator';
                     colorBox.style.backgroundColor = stats.color;
-                    colorBox.style.border = '1px solid #ccc';
-                    colorCell.appendChild(colorBox);
+                    nameCell.appendChild(colorBox);
+                    nameCell.appendChild(document.createTextNode(className));
                     
                     // Percentage
                     const percentCell = row.insertCell();
@@ -388,20 +539,13 @@
                     areaCell.textContent = `${stats.area_m2.toFixed(2)} m²`;
                 });
                 
-                classResultsDiv.appendChild(table);
-                updateLegend(data.segmentation_result);
-
-                
-                log('Analysis complete');
+                statisticsDiv.appendChild(table);
                 
             } catch (error) {
-                log(`Error: ${error.message}`);
                 console.error('Error:', error);
+                alert('An error occurred during analysis. Please try again.');
             }
         }
-
-        // Initial log
-        log('Map initialized at fixed zoom level 18');
     </script>
 </body>
 </html> 
